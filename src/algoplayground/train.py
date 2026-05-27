@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Callable
@@ -9,6 +10,8 @@ from typing import Callable
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -68,17 +71,32 @@ def train_model(
         val_loss = _run_epoch(model, val_loader, loss_fn, device, optimiser=None)
         history.append((train_loss, val_loss))
 
-        if val_loss < best_val:
+        improved = val_loss < best_val
+        if improved:
             best_val = val_loss
             best_epoch = epoch
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
 
+        logger.debug(
+            "Epoch %d: train_loss=%.6f val_loss=%.6f%s",
+            epoch,
+            train_loss,
+            val_loss,
+            " (new best)" if improved else "",
+        )
+
         if on_epoch_end is not None:
             on_epoch_end(epoch, val_loss)
 
         if epochs_without_improvement >= config.early_stopping_patience:
+            logger.info(
+                "Early stopping at epoch %d (best epoch %d, best val_loss=%.6f)",
+                epoch,
+                best_epoch,
+                best_val,
+            )
             break
 
     return TrainResult(best_val_loss=best_val, best_epoch=best_epoch, history=history)
