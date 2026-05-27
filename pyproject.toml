@@ -18,6 +18,8 @@ dependencies = [
     "torch>=2.2",
     "numpy>=1.26",
     "pandas>=2.2",
+    "scikit-learn>=1.4",
+    "optuna>=3.6",
 ]
 
 [dependency-groups]
