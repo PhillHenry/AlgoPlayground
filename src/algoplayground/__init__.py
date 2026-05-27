@@ -6,11 +6,12 @@ from .data import (
     Normalization,
     OHLCVWindowDataset,
     load_ohlcv_csv,
+    train_val_holdout_split,
     train_val_split,
 )
 from .models import CNNConfig, CNNRegressor, LSTMConfig, LSTMRegressor
-from .train import TrainConfig, TrainResult, train_model
-from .tune import TuneConfig, tune
+from .train import TrainConfig, TrainResult, evaluate_model, train_model
+from .tune import TuneConfig, TuneResult, tune
 
 __all__ = [
     "CNNConfig",
@@ -24,8 +25,11 @@ __all__ = [
     "TrainConfig",
     "TrainResult",
     "TuneConfig",
+    "TuneResult",
+    "evaluate_model",
     "load_ohlcv_csv",
     "train_model",
+    "train_val_holdout_split",
     "train_val_split",
     "tune",
 ]

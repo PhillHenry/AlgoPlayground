@@ -102,6 +102,21 @@ def train_model(
     return TrainResult(best_val_loss=best_val, best_epoch=best_epoch, history=history)
 
 
+def evaluate_model(
+    model: nn.Module,
+    dataset: Dataset[tuple[torch.Tensor, torch.Tensor]],
+    batch_size: int = 64,
+    device: str = "cpu",
+) -> float:
+    """Compute mean MSE loss of ``model`` over ``dataset`` (no gradient updates)."""
+    device_t = torch.device(device)
+    model.to(device_t)
+    loader: DataLoader[tuple[torch.Tensor, torch.Tensor]] = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, drop_last=False
+    )
+    return _run_epoch(model, loader, nn.MSELoss(), device_t, optimiser=None)
+
+
 def _run_epoch(
     model: nn.Module,
     loader: DataLoader[tuple[torch.Tensor, torch.Tensor]],

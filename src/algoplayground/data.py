@@ -126,3 +126,25 @@ def train_val_split(
         raise ValueError("val_fraction must be in (0, 1)")
     split = int(len(frame) * (1.0 - val_fraction))
     return frame.iloc[:split].reset_index(drop=True), frame.iloc[split:].reset_index(drop=True)
+
+
+def train_val_holdout_split(
+    frame: pd.DataFrame,
+    val_fraction: float = 0.15,
+    holdout_fraction: float = 0.15,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Chronological 3-way split: train / val / holdout, all in time order."""
+    if not 0.0 < val_fraction < 1.0:
+        raise ValueError("val_fraction must be in (0, 1)")
+    if not 0.0 < holdout_fraction < 1.0:
+        raise ValueError("holdout_fraction must be in (0, 1)")
+    if val_fraction + holdout_fraction >= 1.0:
+        raise ValueError("val_fraction + holdout_fraction must be < 1")
+    n = len(frame)
+    train_end = int(n * (1.0 - val_fraction - holdout_fraction))
+    val_end = int(n * (1.0 - holdout_fraction))
+    return (
+        frame.iloc[:train_end].reset_index(drop=True),
+        frame.iloc[train_end:val_end].reset_index(drop=True),
+        frame.iloc[val_end:].reset_index(drop=True),
+    )

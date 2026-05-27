@@ -9,9 +9,9 @@ from typing import Literal
 import optuna
 import pandas as pd
 
-from .data import OHLCVWindowDataset, load_ohlcv_csv, train_val_split
+from .data import OHLCVWindowDataset, load_ohlcv_csv, train_val_holdout_split
 from .models import CNNConfig, CNNRegressor, LSTMConfig, LSTMRegressor
-from .train import TrainConfig, train_model
+from .train import TrainConfig, evaluate_model, train_model
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +22,17 @@ ModelKind = Literal["lstm", "cnn", "auto"]
 class TuneConfig:
     n_trials: int = 25
     max_epochs: int = 30
-    val_fraction: float = 0.2
+    val_fraction: float = 0.15
+    holdout_fraction: float = 0.15
     model_kind: ModelKind = "auto"
     device: str = "cpu"
     seed: int = 42
+
+
+@dataclass(frozen=True)
+class TuneResult:
+    study: optuna.Study
+    holdout_loss: float
 
 
 def _suggest_lstm(trial: optuna.trial.Trial, n_features: int) -> LSTMRegressor:
@@ -53,18 +60,53 @@ def _suggest_cnn(trial: optuna.trial.Trial, n_features: int) -> CNNRegressor:
     )
 
 
-def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> optuna.Study:
-    """Run an Optuna study and return the completed study object.
+def _build_from_params(
+    params: dict,
+    n_features: int,
+    fallback_model_kind: ModelKind,
+):
+    kind = params.get("model_kind", fallback_model_kind)
+    if kind == "lstm":
+        return LSTMRegressor(
+            LSTMConfig(
+                n_features=n_features,
+                hidden_size=params["hidden_size"],
+                num_layers=params["num_layers"],
+                dropout=params["dropout"],
+            )
+        )
+    depth = params["cnn_depth"]
+    base = params["cnn_base_channels"]
+    channels = tuple(base * (2**i) for i in range(depth))
+    return CNNRegressor(
+        CNNConfig(
+            n_features=n_features,
+            channels=channels,
+            kernel_size=params["kernel_size"],
+            dropout=params["dropout"],
+        )
+    )
 
-    The best hyperparameters are available via ``study.best_params`` and the
-    best validation MSE via ``study.best_value``.
+
+def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
+    """Run an Optuna study and evaluate the best model on a held-out tail.
+
+    The data is split chronologically into train / val / holdout. The study
+    optimises val MSE; after tuning the best hyperparameters are refit on the
+    train set (early-stopped on val) and scored once on the holdout.
     """
-    train_frame, val_frame = train_val_split(frame, val_fraction=config.val_fraction)
+    train_frame, val_frame, holdout_frame = train_val_holdout_split(
+        frame,
+        val_fraction=config.val_fraction,
+        holdout_fraction=config.holdout_fraction,
+    )
     logger.info(
-        "Split data into %d train rows and %d val rows (val_fraction=%.2f)",
+        "Split data into %d train / %d val / %d holdout rows (val=%.2f, holdout=%.2f)",
         len(train_frame),
         len(val_frame),
+        len(holdout_frame),
         config.val_fraction,
+        config.holdout_fraction,
     )
 
     def objective(trial: optuna.trial.Trial) -> float:
@@ -136,19 +178,71 @@ def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> optuna.Study
         study.best_value,
         study.best_trial.number,
     )
-    return study
+
+    holdout_loss = _evaluate_best_on_holdout(
+        study,
+        train_frame,
+        val_frame,
+        holdout_frame,
+        config,
+    )
+    return TuneResult(study=study, holdout_loss=holdout_loss)
+
+
+def _evaluate_best_on_holdout(
+    study: optuna.Study,
+    train_frame: pd.DataFrame,
+    val_frame: pd.DataFrame,
+    holdout_frame: pd.DataFrame,
+    config: TuneConfig,
+) -> float:
+    """Refit best params on train (early-stopped on val) and score on holdout."""
+    params = study.best_params
+    window_size = params["window_size"]
+
+    train_ds = OHLCVWindowDataset(train_frame, window_size=window_size)
+    val_ds = OHLCVWindowDataset(
+        val_frame, window_size=window_size, normalization=train_ds.normalization
+    )
+    holdout_ds = OHLCVWindowDataset(
+        holdout_frame, window_size=window_size, normalization=train_ds.normalization
+    )
+
+    model = _build_from_params(params, train_ds.n_features, config.model_kind)
+    train_config = TrainConfig(
+        epochs=config.max_epochs,
+        batch_size=params["batch_size"],
+        learning_rate=params["learning_rate"],
+        weight_decay=params["weight_decay"],
+        device=config.device,
+    )
+
+    logger.info("Refitting best model on train set for final holdout evaluation")
+    train_model(model, train_ds, val_ds, train_config)
+
+    holdout_loss = evaluate_model(
+        model,
+        holdout_ds,
+        batch_size=params["batch_size"],
+        device=config.device,
+    )
+    logger.info(
+        "Holdout MSE: %.6f (over %d windows)", holdout_loss, len(holdout_ds)
+    )
+    return holdout_loss
 
 
 def main(
     csv_path: str,
     n_trials: int = 25,
     max_epochs: int = 30,
-    val_fraction: float = 0.2,
+    val_fraction: float = 0.15,
+    holdout_fraction: float = 0.15,
     model_kind: ModelKind = "auto",
     device: str = "cpu",
     seed: int = 42,
-) -> optuna.Study:
-    """Load OHLCV data from ``csv_path`` and run an Optuna study."""
+) -> TuneResult:
+    """Load OHLCV data from ``csv_path``, tune, and report holdout error."""
     logger.info("Loading OHLCV CSV from %s", csv_path)
     frame = load_ohlcv_csv(csv_path)
     logger.info(
@@ -157,22 +251,24 @@ def main(
         frame["timestamp"].iloc[0],
         frame["timestamp"].iloc[-1],
     )
-    study = tune(
+    result = tune(
         frame,
         TuneConfig(
             n_trials=n_trials,
             max_epochs=max_epochs,
             val_fraction=val_fraction,
+            holdout_fraction=holdout_fraction,
             model_kind=model_kind,
             device=device,
             seed=seed,
         ),
     )
-    logger.info("Best validation MSE: %.6f", study.best_value)
+    logger.info("Best validation MSE: %.6f", result.study.best_value)
+    logger.info("Holdout MSE:        %.6f", result.holdout_loss)
     logger.info("Best params:")
-    for name, value in study.best_params.items():
+    for name, value in result.study.best_params.items():
         logger.info("  %s: %s", name, value)
-    return study
+    return result
 
 
 if __name__ == "__main__":
@@ -206,7 +302,8 @@ if __name__ == "__main__":
     parser.add_argument("csv_path", help="Path to an OHLCV CSV file.")
     parser.add_argument("--n-trials", type=int, default=25)
     parser.add_argument("--max-epochs", type=int, default=30)
-    parser.add_argument("--val-fraction", type=float, default=0.2)
+    parser.add_argument("--val-fraction", type=float, default=0.15)
+    parser.add_argument("--holdout-fraction", type=float, default=0.15)
     parser.add_argument(
         "--model-kind",
         choices=["lstm", "cnn", "auto"],
@@ -221,6 +318,7 @@ if __name__ == "__main__":
         n_trials=args.n_trials,
         max_epochs=args.max_epochs,
         val_fraction=args.val_fraction,
+        holdout_fraction=args.holdout_fraction,
         model_kind=args.model_kind,
         device=args.device,
         seed=args.seed,
