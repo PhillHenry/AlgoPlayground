@@ -206,7 +206,9 @@ def _evaluate_best_on_holdout(
         val_frame, window_size=window_size, normalization=train_ds.normalization
     )
     holdout_ds = OHLCVWindowDataset(
-        holdout_frame, window_size=window_size, normalization=train_ds.normalization
+        holdout_frame,
+        window_size=window_size,
+        normalization=train_ds.normalization,
     )
 
     model = _build_from_params(params, train_ds.n_features, config.model_kind)
@@ -228,7 +230,10 @@ def _evaluate_best_on_holdout(
         device=config.device,
     )
     logger.info(
-        "Holdout MSE: %.6f (over %d windows)", holdout_loss, len(holdout_ds)
+        "Holdout MSE: %.6f (over %d windows, target lags features by %d bar)",
+        holdout_loss,
+        len(holdout_ds),
+        holdout_ds.horizon,
     )
     return holdout_loss
 
@@ -307,7 +312,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=60,
+        default=1440,
         help="Size of alternating train/val blocks within the non-holdout range.",
     )
     parser.add_argument(

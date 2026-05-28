@@ -131,7 +131,7 @@ def train_val_split(
 def train_val_holdout_split(
     frame: pd.DataFrame,
     holdout_fraction: float = 0.15,
-    chunk_size: int = 60,
+    chunk_size: int = 1440,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Reserve the final ``holdout_fraction`` of rows as a chronological holdout.
 
