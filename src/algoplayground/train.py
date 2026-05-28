@@ -7,6 +7,7 @@ import math
 from dataclasses import dataclass
 from typing import Callable
 
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
@@ -115,6 +116,29 @@ def evaluate_model(
         dataset, batch_size=batch_size, shuffle=False, drop_last=False
     )
     return _run_epoch(model, loader, nn.MSELoss(), device_t, optimiser=None)
+
+
+def predict_dataset(
+    model: nn.Module,
+    dataset: Dataset[tuple[torch.Tensor, torch.Tensor]],
+    batch_size: int = 64,
+    device: str = "cpu",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Run ``model`` over ``dataset`` and return ``(predictions, targets)``."""
+    device_t = torch.device(device)
+    model.to(device_t)
+    model.eval()
+    loader: DataLoader[tuple[torch.Tensor, torch.Tensor]] = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, drop_last=False
+    )
+    preds: list[np.ndarray] = []
+    tgts: list[np.ndarray] = []
+    with torch.no_grad():
+        for inputs, targets in loader:
+            inputs = inputs.to(device_t)
+            preds.append(model(inputs).detach().cpu().numpy())
+            tgts.append(targets.detach().cpu().numpy())
+    return np.concatenate(preds), np.concatenate(tgts)
 
 
 def _run_epoch(

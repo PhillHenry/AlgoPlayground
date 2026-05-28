@@ -6,12 +6,13 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
+import numpy as np
 import optuna
 import pandas as pd
 
 from .data import OHLCVWindowDataset, load_ohlcv_csv, train_val_holdout_split
 from .models import CNNConfig, CNNRegressor, LSTMConfig, LSTMRegressor
-from .train import TrainConfig, evaluate_model, train_model
+from .train import TrainConfig, evaluate_model, predict_dataset, train_model
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class TuneConfig:
 class TuneResult:
     study: optuna.Study
     holdout_loss: float
+    holdout_sum_diff: float
 
 
 def _suggest_lstm(trial: optuna.trial.Trial, n_features: int) -> LSTMRegressor:
@@ -180,14 +182,18 @@ def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
         study.best_trial.number,
     )
 
-    holdout_loss = _evaluate_best_on_holdout(
+    holdout_loss, holdout_sum_diff = _evaluate_best_on_holdout(
         study,
         train_frame,
         val_frame,
         holdout_frame,
         config,
     )
-    return TuneResult(study=study, holdout_loss=holdout_loss)
+    return TuneResult(
+        study=study,
+        holdout_loss=holdout_loss,
+        holdout_sum_diff=holdout_sum_diff,
+    )
 
 
 def _evaluate_best_on_holdout(
@@ -196,8 +202,12 @@ def _evaluate_best_on_holdout(
     val_frame: pd.DataFrame,
     holdout_frame: pd.DataFrame,
     config: TuneConfig,
-) -> float:
-    """Refit best params on train (early-stopped on val) and score on holdout."""
+) -> tuple[float, float]:
+    """Refit best params on train (early-stopped on val) and score on holdout.
+
+    Returns ``(mse, sum_of_signed_differences)`` where the sum is computed in
+    the original target units (i.e. after inverting the normalization).
+    """
     params = study.best_params
     window_size = params["window_size"]
 
@@ -229,13 +239,29 @@ def _evaluate_best_on_holdout(
         batch_size=params["batch_size"],
         device=config.device,
     )
+    preds_norm, targets_norm = predict_dataset(
+        model,
+        holdout_ds,
+        batch_size=params["batch_size"],
+        device=config.device,
+    )
+    preds = holdout_ds.normalization.invert_target(preds_norm)
+    targets = holdout_ds.normalization.invert_target(targets_norm)
+    sum_diff = float(np.sum(preds - targets))
+
     logger.info(
         "Holdout MSE: %.6f (over %d windows, target lags features by %d bar)",
         holdout_loss,
         len(holdout_ds),
         holdout_ds.horizon,
     )
-    return holdout_loss
+    logger.info(
+        "Holdout sum of (prediction - actual) in target units: %.6f "
+        "(mean per-sample: %.6f)",
+        sum_diff,
+        sum_diff / max(len(holdout_ds), 1),
+    )
+    return holdout_loss, sum_diff
 
 
 def main(
@@ -269,9 +295,10 @@ def main(
             seed=seed,
         ),
     )
-    logger.info("Best validation MSE: %.6f", result.study.best_value)
-    logger.info("Holdout MSE:        %.6f", result.holdout_loss)
-    logger.info("Best params:")
+    logger.info("Best validation MSE:        %.6f", result.study.best_value)
+    logger.info("Holdout MSE:                %.6f", result.holdout_loss)
+    logger.info("Holdout Σ(pred - actual):   %.6f", result.holdout_sum_diff)
+    logger.info("Best params:"  )
     for name, value in result.study.best_params.items():
         logger.info("  %s: %s", name, value)
     return result
