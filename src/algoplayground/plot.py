@@ -38,9 +38,16 @@ def plot_actual_vs_predicted(
     )
 
     fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(actual.index, actual.values, label="actual", linewidth=1.2)
-    ax.plot(predicted.index, predicted.values, label="predicted", linewidth=1.2)
-    ax.plot(
+    line_actual, = ax.plot(actual.index, actual.values, label="actual", linewidth=1.2)
+    line_pred, = ax.plot(
+        predicted.index, predicted.values, label="predicted", linewidth=1.2
+    )
+    ax.set_xlabel("sample index")
+    ax.set_ylabel("actual / predicted")
+    ax.grid(True, alpha=0.3)
+
+    ax2 = ax.twinx()
+    line_diff, = ax2.plot(
         diff.index,
         diff.values,
         label="diff (pred - actual)",
@@ -48,12 +55,15 @@ def plot_actual_vs_predicted(
         color="tab:red",
         alpha=0.7,
     )
-    ax.axhline(0.0, color="black", linewidth=0.5, alpha=0.4)
-    ax.set_xlabel("sample index")
-    ax.set_ylabel("value")
+    ax2.axhline(0.0, color="tab:red", linewidth=0.5, alpha=0.3)
+    ax2.set_ylabel("diff (pred - actual)", color="tab:red")
+    ax2.tick_params(axis="y", labelcolor="tab:red")
+
     ax.set_title(f"actual vs predicted ({Path(csv_path).name})")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax.legend(
+        handles=[line_actual, line_pred, line_diff],
+        loc="upper left",
+    )
     fig.tight_layout()
 
     if output_path is not None:
