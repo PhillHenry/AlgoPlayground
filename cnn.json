@@ -1,0 +1,10 @@
+{
+  "window_size": 24,
+  "batch_size": 32,
+  "learning_rate": 0.0002051338263087451,
+  "weight_decay": 6.02521573620385e-08,
+  "cnn_depth": 1,
+  "cnn_base_channels": 16,
+  "kernel_size": 5,
+  "dropout": 0.10616955533913808
+}

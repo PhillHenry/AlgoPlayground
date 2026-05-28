@@ -10,7 +10,12 @@ import numpy as np
 import optuna
 import pandas as pd
 
-from .data import OHLCVWindowDataset, load_ohlcv_csv, train_val_holdout_split
+from .data import (
+    OHLCVWindowDataset,
+    WalkForwardFold,
+    load_ohlcv_csv,
+    walk_forward_folds,
+)
 from .models import CNNConfig, CNNRegressor, LSTMConfig, LSTMRegressor
 from .train import TrainConfig, evaluate_model, predict_dataset, train_model
 
@@ -25,6 +30,9 @@ class TuneConfig:
     max_epochs: int = 30
     holdout_fraction: float = 0.15
     chunk_size: int = 60
+    initial_train_size: int | None = None
+    step_size: int | None = None
+    expanding: bool = False
     model_kind: ModelKind = "auto"
     device: str = "cpu"
     seed: int = 42
@@ -92,26 +100,36 @@ def _build_from_params(
 
 
 def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
-    """Run an Optuna study and evaluate the best model on a held-out tail.
+    """Run an Optuna study under walk-forward validation, score best on holdout.
 
-    The data is split chronologically into train / val / holdout. The study
-    optimises val MSE; after tuning the best hyperparameters are refit on the
-    train set (early-stopped on val) and scored once on the holdout.
+    The pre-holdout range is split into walk-forward folds (see
+    :func:`walk_forward_folds`). Each Optuna trial trains a fresh model on
+    every fold and the trial's objective is the **mean** of the per-fold best
+    val MSEs. After tuning, the best params are refit on the last fold's
+    train (early-stopped on its val) and scored once on the holdout.
     """
-    train_frame, val_frame, holdout_frame = train_val_holdout_split(
+    folds, holdout_frame = walk_forward_folds(
         frame,
         holdout_fraction=config.holdout_fraction,
-        chunk_size=config.chunk_size,
+        val_chunk_size=config.chunk_size,
+        initial_train_size=config.initial_train_size,
+        step_size=config.step_size,
+        expanding=config.expanding,
     )
     logger.info(
-        "Split data into %d train / %d val / %d holdout rows "
-        "(holdout=%.2f, alternating chunk_size=%d)",
-        len(train_frame),
-        len(val_frame),
-        len(holdout_frame),
-        config.holdout_fraction,
+        "Built %d walk-forward folds (val_chunk_size=%d, initial_train_size=%s, "
+        "step_size=%s, expanding=%s) + %d holdout rows",
+        len(folds),
         config.chunk_size,
+        config.initial_train_size if config.initial_train_size is not None else config.chunk_size,
+        config.step_size if config.step_size is not None else config.chunk_size,
+        config.expanding,
+        len(holdout_frame),
     )
+    for i, fold in enumerate(folds):
+        logger.info(
+            "  fold %d: train=%d val=%d", i, len(fold.train), len(fold.val)
+        )
 
     def objective(trial: optuna.trial.Trial) -> float:
         window_size = trial.suggest_int("window_size", 8, 64, step=8)
@@ -119,28 +137,32 @@ def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
         learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
         weight_decay = trial.suggest_float("weight_decay", 1e-8, 1e-3, log=True)
 
-        train_ds = OHLCVWindowDataset(train_frame, window_size=window_size)
-        val_ds = OHLCVWindowDataset(
-            val_frame, window_size=window_size, normalization=train_ds.normalization
-        )
-
         kind: ModelKind = config.model_kind
         if kind == "auto":
             kind = trial.suggest_categorical("model_kind", ["lstm", "cnn"])  # type: ignore[assignment]
 
+        # Suggest model-specific hyperparams ONCE per trial (Optuna disallows
+        # re-suggesting the same name), then reuse them to build a fresh model
+        # for each walk-forward fold.
         if kind == "lstm":
-            model = _suggest_lstm(trial, train_ds.n_features)
+            hidden_size = trial.suggest_categorical("hidden_size", [32, 64, 128])
+            num_layers = trial.suggest_int("num_layers", 1, 3)
+            dropout = trial.suggest_float("dropout", 0.0, 0.5)
         else:
-            model = _suggest_cnn(trial, train_ds.n_features)
+            cnn_depth = trial.suggest_int("cnn_depth", 1, 3)
+            cnn_base_channels = trial.suggest_categorical("cnn_base_channels", [16, 32, 64])
+            kernel_size = trial.suggest_categorical("kernel_size", [3, 5, 7])
+            dropout = trial.suggest_float("dropout", 0.0, 0.5)
 
         logger.info(
-            "Trial %d starting: model=%s window=%d batch=%d lr=%.2e wd=%.2e",
+            "Trial %d starting: model=%s window=%d batch=%d lr=%.2e wd=%.2e (%d folds)",
             trial.number,
             kind,
             window_size,
             batch_size,
             learning_rate,
             weight_decay,
+            len(folds),
         )
 
         train_config = TrainConfig(
@@ -151,23 +173,66 @@ def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
             device=config.device,
         )
 
-        def report(epoch: int, val_loss: float) -> None:
-            trial.report(val_loss, step=epoch)
+        fold_losses: list[float] = []
+        for fold_idx, fold in enumerate(folds):
+            train_ds = OHLCVWindowDataset(fold.train, window_size=window_size)
+            val_ds = OHLCVWindowDataset(
+                fold.val, window_size=window_size, normalization=train_ds.normalization
+            )
+
+            if kind == "lstm":
+                model = LSTMRegressor(
+                    LSTMConfig(
+                        n_features=train_ds.n_features,
+                        hidden_size=hidden_size,
+                        num_layers=num_layers,
+                        dropout=dropout,
+                    )
+                )
+            else:
+                channels = tuple(cnn_base_channels * (2**i) for i in range(cnn_depth))
+                model = CNNRegressor(
+                    CNNConfig(
+                        n_features=train_ds.n_features,
+                        channels=channels,
+                        kernel_size=kernel_size,
+                        dropout=dropout,
+                    )
+                )
+
+            result = train_model(model, train_ds, val_ds, train_config)
+            fold_losses.append(result.best_val_loss)
+            logger.info(
+                "  trial %d fold %d/%d: val_loss=%.6f (best epoch %d)",
+                trial.number,
+                fold_idx,
+                len(folds) - 1,
+                result.best_val_loss,
+                result.best_epoch,
+            )
+
+            running_mean = float(np.mean(fold_losses))
+            trial.report(running_mean, step=fold_idx)
             if trial.should_prune():
-                logger.info("Trial %d pruned at epoch %d (val_loss=%.6f)", trial.number, epoch, val_loss)
+                logger.info(
+                    "Trial %d pruned after fold %d (running mean val_loss=%.6f)",
+                    trial.number,
+                    fold_idx,
+                    running_mean,
+                )
                 raise optuna.TrialPruned()
 
-        result = train_model(model, train_ds, val_ds, train_config, on_epoch_end=report)
+        mean_loss = float(np.mean(fold_losses))
         logger.info(
-            "Trial %d finished: best_val_loss=%.6f at epoch %d",
+            "Trial %d finished: mean_val_loss=%.6f over %d folds",
             trial.number,
-            result.best_val_loss,
-            result.best_epoch,
+            mean_loss,
+            len(folds),
         )
-        return result.best_val_loss
+        return mean_loss
 
     sampler = optuna.samplers.TPESampler(seed=config.seed)
-    pruner = optuna.pruners.MedianPruner(n_warmup_steps=3)
+    pruner = optuna.pruners.MedianPruner(n_warmup_steps=1)
     study = optuna.create_study(direction="minimize", sampler=sampler, pruner=pruner)
     logger.info(
         "Starting Optuna study: n_trials=%d max_epochs=%d model_kind=%s device=%s",
@@ -185,8 +250,7 @@ def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
 
     holdout_loss, holdout_sum_diff, holdout_mape = _evaluate_best_on_holdout(
         study,
-        train_frame,
-        val_frame,
+        folds,
         holdout_frame,
         config,
     )
@@ -200,12 +264,11 @@ def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
 
 def _evaluate_best_on_holdout(
     study: optuna.Study,
-    train_frame: pd.DataFrame,
-    val_frame: pd.DataFrame,
+    folds: list[WalkForwardFold],
     holdout_frame: pd.DataFrame,
     config: TuneConfig,
 ) -> tuple[float, float, float]:
-    """Refit best params on train (early-stopped on val) and score on holdout.
+    """Refit best params on the last walk-forward fold and score on holdout.
 
     Returns ``(mse, sum_of_signed_differences, mape_percent)``. The sum and
     MAPE are computed in the original target units (i.e. after inverting the
@@ -214,10 +277,11 @@ def _evaluate_best_on_holdout(
     """
     params = study.best_params
     window_size = params["window_size"]
+    last_fold = folds[-1]
 
-    train_ds = OHLCVWindowDataset(train_frame, window_size=window_size)
+    train_ds = OHLCVWindowDataset(last_fold.train, window_size=window_size)
     val_ds = OHLCVWindowDataset(
-        val_frame, window_size=window_size, normalization=train_ds.normalization
+        last_fold.val, window_size=window_size, normalization=train_ds.normalization
     )
     holdout_ds = OHLCVWindowDataset(
         holdout_frame,
@@ -234,7 +298,12 @@ def _evaluate_best_on_holdout(
         device=config.device,
     )
 
-    logger.info("Refitting best model on train set for final holdout evaluation")
+    logger.info(
+        "Refitting best model on last walk-forward fold (%d train / %d val rows) "
+        "for final holdout evaluation",
+        len(last_fold.train),
+        len(last_fold.val),
+    )
     train_model(model, train_ds, val_ds, train_config)
 
     holdout_loss = evaluate_model(

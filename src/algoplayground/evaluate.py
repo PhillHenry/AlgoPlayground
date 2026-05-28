@@ -12,7 +12,12 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from .data import OHLCVWindowDataset, load_ohlcv_csv, train_val_holdout_split
+from .data import (
+    OHLCVWindowDataset,
+    WalkForwardFold,
+    load_ohlcv_csv,
+    walk_forward_folds,
+)
 from .models import CNNConfig, CNNRegressor, LSTMConfig, LSTMRegressor
 from .train import TrainConfig, evaluate_model, predict_dataset, train_model
 
@@ -27,6 +32,11 @@ class HoldoutMetrics:
     sum_diff: float
     mape: float
     n_samples: int
+    fold_val_losses: tuple[float, ...] = ()
+
+    @property
+    def mean_fold_val_loss(self) -> float:
+        return float(np.mean(self.fold_val_losses)) if self.fold_val_losses else float("nan")
 
 
 def _compute_holdout_metrics(
@@ -72,6 +82,45 @@ def _compute_holdout_metrics(
     )
 
 
+def _build_model(
+    model_kind: ModelKind,
+    n_features: int,
+    *,
+    dropout: float,
+    hidden_size: int | None,
+    num_layers: int | None,
+    cnn_depth: int | None,
+    cnn_base_channels: int | None,
+    kernel_size: int | None,
+):
+    if model_kind == "lstm":
+        if hidden_size is None or num_layers is None:
+            raise ValueError("LSTM requires hidden_size and num_layers")
+        return LSTMRegressor(
+            LSTMConfig(
+                n_features=n_features,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                dropout=dropout,
+            )
+        )
+    if model_kind == "cnn":
+        if cnn_depth is None or cnn_base_channels is None or kernel_size is None:
+            raise ValueError(
+                "CNN requires cnn_depth, cnn_base_channels and kernel_size"
+            )
+        channels = tuple(cnn_base_channels * (2**i) for i in range(cnn_depth))
+        return CNNRegressor(
+            CNNConfig(
+                n_features=n_features,
+                channels=channels,
+                kernel_size=kernel_size,
+                dropout=dropout,
+            )
+        )
+    raise ValueError(f"Unknown model_kind: {model_kind}")
+
+
 def evaluate_on_holdout(
     frame: pd.DataFrame,
     *,
@@ -88,59 +137,35 @@ def evaluate_on_holdout(
     kernel_size: int | None = None,
     holdout_fraction: float = 0.15,
     chunk_size: int = 60,
+    initial_train_size: int | None = None,
+    step_size: int | None = None,
+    expanding: bool = False,
     max_epochs: int = 30,
     early_stopping_patience: int = 5,
     device: str = "cpu",
 ) -> HoldoutMetrics:
-    """Split ``frame``, build the requested model, train, and score on the holdout."""
-    train_frame, val_frame, holdout_frame = train_val_holdout_split(
-        frame, holdout_fraction=holdout_fraction, chunk_size=chunk_size
+    """Walk-forward train+validate, then refit on the last fold and score holdout.
+
+    A fresh model is trained per walk-forward fold; per-fold best val MSEs are
+    aggregated and reported as the mean walk-forward val loss. The final
+    holdout MSE/Σ-diff/MAPE comes from refitting the same hyperparameters on
+    the last fold's train (early-stopped on its val) and scoring on holdout.
+    """
+    folds, holdout_frame = walk_forward_folds(
+        frame,
+        holdout_fraction=holdout_fraction,
+        val_chunk_size=chunk_size,
+        initial_train_size=initial_train_size,
+        step_size=step_size,
+        expanding=expanding,
     )
     logger.info(
-        "Split data into %d train / %d val / %d holdout rows "
-        "(holdout=%.2f, alternating chunk_size=%d)",
-        len(train_frame),
-        len(val_frame),
-        len(holdout_frame),
-        holdout_fraction,
+        "Built %d walk-forward folds (val_chunk_size=%d, expanding=%s) + %d holdout rows",
+        len(folds),
         chunk_size,
+        expanding,
+        len(holdout_frame),
     )
-
-    train_ds = OHLCVWindowDataset(train_frame, window_size=window_size)
-    val_ds = OHLCVWindowDataset(
-        val_frame, window_size=window_size, normalization=train_ds.normalization
-    )
-    holdout_ds = OHLCVWindowDataset(
-        holdout_frame, window_size=window_size, normalization=train_ds.normalization
-    )
-
-    if model_kind == "lstm":
-        if hidden_size is None or num_layers is None:
-            raise ValueError("LSTM requires hidden_size and num_layers")
-        model = LSTMRegressor(
-            LSTMConfig(
-                n_features=train_ds.n_features,
-                hidden_size=hidden_size,
-                num_layers=num_layers,
-                dropout=dropout,
-            )
-        )
-    elif model_kind == "cnn":
-        if cnn_depth is None or cnn_base_channels is None or kernel_size is None:
-            raise ValueError(
-                "CNN requires cnn_depth, cnn_base_channels and kernel_size"
-            )
-        channels = tuple(cnn_base_channels * (2**i) for i in range(cnn_depth))
-        model = CNNRegressor(
-            CNNConfig(
-                n_features=train_ds.n_features,
-                channels=channels,
-                kernel_size=kernel_size,
-                dropout=dropout,
-            )
-        )
-    else:
-        raise ValueError(f"Unknown model_kind: {model_kind}")
 
     train_config = TrainConfig(
         epochs=max_epochs,
@@ -160,9 +185,61 @@ def evaluate_on_holdout(
         dropout,
         max_epochs,
     )
-    train_model(model, train_ds, val_ds, train_config)
 
-    metrics = _compute_holdout_metrics(model, holdout_ds, batch_size, device)
+    fold_losses = _walk_forward_train(
+        folds,
+        window_size=window_size,
+        model_kind=model_kind,
+        dropout=dropout,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        cnn_depth=cnn_depth,
+        cnn_base_channels=cnn_base_channels,
+        kernel_size=kernel_size,
+        train_config=train_config,
+    )
+    mean_fold_loss = float(np.mean(fold_losses))
+    logger.info(
+        "Walk-forward mean val MSE: %.6f over %d folds (per-fold: %s)",
+        mean_fold_loss,
+        len(fold_losses),
+        [f"{x:.6f}" for x in fold_losses],
+    )
+
+    last_fold = folds[-1]
+    train_ds = OHLCVWindowDataset(last_fold.train, window_size=window_size)
+    val_ds = OHLCVWindowDataset(
+        last_fold.val, window_size=window_size, normalization=train_ds.normalization
+    )
+    holdout_ds = OHLCVWindowDataset(
+        holdout_frame, window_size=window_size, normalization=train_ds.normalization
+    )
+
+    final_model = _build_model(
+        model_kind,
+        train_ds.n_features,
+        dropout=dropout,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        cnn_depth=cnn_depth,
+        cnn_base_channels=cnn_base_channels,
+        kernel_size=kernel_size,
+    )
+    logger.info(
+        "Refitting on last fold (%d train / %d val rows) for final holdout score",
+        len(last_fold.train),
+        len(last_fold.val),
+    )
+    train_model(final_model, train_ds, val_ds, train_config)
+
+    metrics = _compute_holdout_metrics(final_model, holdout_ds, batch_size, device)
+    metrics = HoldoutMetrics(
+        mse=metrics.mse,
+        sum_diff=metrics.sum_diff,
+        mape=metrics.mape,
+        n_samples=metrics.n_samples,
+        fold_val_losses=tuple(fold_losses),
+    )
     logger.info(
         "Holdout MSE:              %.6f (over %d windows, target lags features by %d bar)",
         metrics.mse,
@@ -176,6 +253,50 @@ def evaluate_on_holdout(
     )
     logger.info("Holdout MAPE:             %.4f%%", metrics.mape)
     return metrics
+
+
+def _walk_forward_train(
+    folds: list[WalkForwardFold],
+    *,
+    window_size: int,
+    model_kind: ModelKind,
+    dropout: float,
+    hidden_size: int | None,
+    num_layers: int | None,
+    cnn_depth: int | None,
+    cnn_base_channels: int | None,
+    kernel_size: int | None,
+    train_config: TrainConfig,
+) -> list[float]:
+    """Train a fresh model per fold and return each fold's best val MSE."""
+    fold_losses: list[float] = []
+    for fold_idx, fold in enumerate(folds):
+        train_ds = OHLCVWindowDataset(fold.train, window_size=window_size)
+        val_ds = OHLCVWindowDataset(
+            fold.val, window_size=window_size, normalization=train_ds.normalization
+        )
+        model = _build_model(
+            model_kind,
+            train_ds.n_features,
+            dropout=dropout,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            cnn_depth=cnn_depth,
+            cnn_base_channels=cnn_base_channels,
+            kernel_size=kernel_size,
+        )
+        result = train_model(model, train_ds, val_ds, train_config)
+        fold_losses.append(result.best_val_loss)
+        logger.info(
+            "  fold %d/%d: train=%d val=%d best_val_loss=%.6f at epoch %d",
+            fold_idx,
+            len(folds) - 1,
+            len(fold.train),
+            len(fold.val),
+            result.best_val_loss,
+            result.best_epoch,
+        )
+    return fold_losses
 
 
 _REQUIRED_COMMON_KEYS = (
@@ -259,7 +380,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("--holdout-fraction", type=float, default=0.15)
-    parser.add_argument("--chunk-size", type=int, default=60)
+    parser.add_argument("--chunk-size", type=int, default=1440)
     parser.add_argument("--max-epochs", type=int, default=30)
     parser.add_argument("--early-stopping-patience", type=int, default=5)
     parser.add_argument("--device", default="cpu")

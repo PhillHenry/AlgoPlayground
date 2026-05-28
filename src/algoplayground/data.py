@@ -128,6 +128,83 @@ def train_val_split(
     return frame.iloc[:split].reset_index(drop=True), frame.iloc[split:].reset_index(drop=True)
 
 
+@dataclass(frozen=True)
+class WalkForwardFold:
+    """One walk-forward training/validation pair (in chronological order)."""
+
+    train: pd.DataFrame
+    val: pd.DataFrame
+
+
+def walk_forward_folds(
+    frame: pd.DataFrame,
+    *,
+    holdout_fraction: float = 0.15,
+    val_chunk_size: int = 60,
+    initial_train_size: int | None = None,
+    step_size: int | None = None,
+    expanding: bool = True,
+) -> tuple[list[WalkForwardFold], pd.DataFrame]:
+    """Build walk-forward train/val folds plus a final chronological holdout.
+
+    The last ``holdout_fraction`` of ``frame`` is reserved as the holdout. The
+    remaining pre-holdout range is sliced into overlapping ``(train, val)``
+    folds: fold 0 trains on the first ``initial_train_size`` rows and
+    validates on the next ``val_chunk_size`` rows; subsequent folds advance
+    the val window by ``step_size`` rows and extend (``expanding=True``) or
+    slide (``expanding=False``, fixed-size rolling window of
+    ``initial_train_size`` rows) the train window accordingly.
+
+    Defaults:
+      ``initial_train_size`` → ``val_chunk_size`` (smallest meaningful fold).
+      ``step_size``          → ``val_chunk_size`` (non-overlapping val sets).
+    """
+    if not 0.0 < holdout_fraction < 1.0:
+        raise ValueError("holdout_fraction must be in (0, 1)")
+    if val_chunk_size < 1:
+        raise ValueError("val_chunk_size must be >= 1")
+    if initial_train_size is None:
+        initial_train_size = val_chunk_size
+    if initial_train_size < 1:
+        raise ValueError("initial_train_size must be >= 1")
+    if step_size is None:
+        step_size = val_chunk_size
+    if step_size < 1:
+        raise ValueError("step_size must be >= 1")
+
+    n = len(frame)
+    holdout_start = int(n * (1.0 - holdout_fraction))
+    pre_holdout = frame.iloc[:holdout_start]
+    holdout = frame.iloc[holdout_start:].reset_index(drop=True)
+
+    folds: list[WalkForwardFold] = []
+    train_end = initial_train_size
+    while train_end + val_chunk_size <= len(pre_holdout):
+        val_end = train_end + val_chunk_size
+        if expanding:
+            train_part = pre_holdout.iloc[:train_end]
+        else:
+            train_part = pre_holdout.iloc[
+                max(0, train_end - initial_train_size) : train_end
+            ]
+        val_part = pre_holdout.iloc[train_end:val_end]
+        folds.append(
+            WalkForwardFold(
+                train=train_part.reset_index(drop=True),
+                val=val_part.reset_index(drop=True),
+            )
+        )
+        train_end += step_size
+
+    if not folds:
+        raise ValueError(
+            f"No walk-forward folds produced: pre-holdout has {len(pre_holdout)} "
+            f"rows but initial_train_size + val_chunk_size = "
+            f"{initial_train_size + val_chunk_size}."
+        )
+    return folds, holdout
+
+
 def train_val_holdout_split(
     frame: pd.DataFrame,
     holdout_fraction: float = 0.15,

@@ -5,9 +5,11 @@ from .data import (
     OHLCV_COLUMNS,
     Normalization,
     OHLCVWindowDataset,
+    WalkForwardFold,
     load_ohlcv_csv,
     train_val_holdout_split,
     train_val_split,
+    walk_forward_folds,
 )
 from .models import CNNConfig, CNNRegressor, LSTMConfig, LSTMRegressor
 from .evaluate import HoldoutMetrics, evaluate_on_holdout
@@ -28,6 +30,7 @@ __all__ = [
     "TrainResult",
     "TuneConfig",
     "TuneResult",
+    "WalkForwardFold",
     "evaluate_model",
     "evaluate_on_holdout",
     "load_ohlcv_csv",
@@ -36,4 +39,5 @@ __all__ = [
     "train_val_holdout_split",
     "train_val_split",
     "tune",
+    "walk_forward_folds",
 ]
