@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import tempfile
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -47,6 +50,23 @@ def _compute_holdout_metrics(
         )
     else:
         mape = float("nan")
+
+    predictions_frame = pd.DataFrame(
+        {
+            "window_index": np.arange(len(preds)),
+            "actual": targets,
+            "predicted": preds,
+            "diff": preds - targets,
+        }
+    )
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = (
+        Path(tempfile.gettempdir())
+        / f"algoplayground_holdout_predictions_{stamp}.csv"
+    )
+    predictions_frame.to_csv(out_path, index=False)
+    logger.info("Wrote %d holdout predictions to %s", len(predictions_frame), out_path)
+
     return HoldoutMetrics(
         mse=mse, sum_diff=sum_diff, mape=mape, n_samples=len(holdout_ds)
     )

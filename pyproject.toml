@@ -20,6 +20,7 @@ dependencies = [
     "pandas>=2.2",
     "scikit-learn>=1.4",
     "optuna>=3.6",
+    "matplotlib>=3.8",
 ]
 
 [dependency-groups]
