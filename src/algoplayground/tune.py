@@ -22,8 +22,8 @@ ModelKind = Literal["lstm", "cnn", "auto"]
 class TuneConfig:
     n_trials: int = 25
     max_epochs: int = 30
-    val_fraction: float = 0.15
     holdout_fraction: float = 0.15
+    chunk_size: int = 60
     model_kind: ModelKind = "auto"
     device: str = "cpu"
     seed: int = 42
@@ -97,16 +97,17 @@ def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
     """
     train_frame, val_frame, holdout_frame = train_val_holdout_split(
         frame,
-        val_fraction=config.val_fraction,
         holdout_fraction=config.holdout_fraction,
+        chunk_size=config.chunk_size,
     )
     logger.info(
-        "Split data into %d train / %d val / %d holdout rows (val=%.2f, holdout=%.2f)",
+        "Split data into %d train / %d val / %d holdout rows "
+        "(holdout=%.2f, alternating chunk_size=%d)",
         len(train_frame),
         len(val_frame),
         len(holdout_frame),
-        config.val_fraction,
         config.holdout_fraction,
+        config.chunk_size,
     )
 
     def objective(trial: optuna.trial.Trial) -> float:
@@ -236,8 +237,8 @@ def main(
     csv_path: str,
     n_trials: int = 25,
     max_epochs: int = 30,
-    val_fraction: float = 0.15,
     holdout_fraction: float = 0.15,
+    chunk_size: int = 60,
     model_kind: ModelKind = "auto",
     device: str = "cpu",
     seed: int = 42,
@@ -256,8 +257,8 @@ def main(
         TuneConfig(
             n_trials=n_trials,
             max_epochs=max_epochs,
-            val_fraction=val_fraction,
             holdout_fraction=holdout_fraction,
+            chunk_size=chunk_size,
             model_kind=model_kind,
             device=device,
             seed=seed,
@@ -302,8 +303,13 @@ if __name__ == "__main__":
     parser.add_argument("csv_path", help="Path to an OHLCV CSV file.")
     parser.add_argument("--n-trials", type=int, default=25)
     parser.add_argument("--max-epochs", type=int, default=30)
-    parser.add_argument("--val-fraction", type=float, default=0.15)
     parser.add_argument("--holdout-fraction", type=float, default=0.15)
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=60,
+        help="Size of alternating train/val blocks within the non-holdout range.",
+    )
     parser.add_argument(
         "--model-kind",
         choices=["lstm", "cnn", "auto"],
@@ -317,8 +323,8 @@ if __name__ == "__main__":
         csv_path=args.csv_path,
         n_trials=args.n_trials,
         max_epochs=args.max_epochs,
-        val_fraction=args.val_fraction,
         holdout_fraction=args.holdout_fraction,
+        chunk_size=args.chunk_size,
         model_kind=args.model_kind,
         device=args.device,
         seed=args.seed,

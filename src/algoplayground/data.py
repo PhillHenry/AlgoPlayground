@@ -130,21 +130,35 @@ def train_val_split(
 
 def train_val_holdout_split(
     frame: pd.DataFrame,
-    val_fraction: float = 0.15,
     holdout_fraction: float = 0.15,
+    chunk_size: int = 60,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Chronological 3-way split: train / val / holdout, all in time order."""
-    if not 0.0 < val_fraction < 1.0:
-        raise ValueError("val_fraction must be in (0, 1)")
+    """Reserve the final ``holdout_fraction`` of rows as a chronological holdout.
+
+    The pre-holdout range is sliced into contiguous blocks of ``chunk_size``
+    rows and the blocks are dealt out in alternation: block 0 → train,
+    block 1 → val, block 2 → train, block 3 → val, … so both sets cover the
+    full pre-holdout time range. A short trailing block (if the pre-holdout
+    length is not a multiple of ``chunk_size``) is assigned to whichever set
+    is next in the rotation.
+    """
     if not 0.0 < holdout_fraction < 1.0:
         raise ValueError("holdout_fraction must be in (0, 1)")
-    if val_fraction + holdout_fraction >= 1.0:
-        raise ValueError("val_fraction + holdout_fraction must be < 1")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be >= 1")
+
     n = len(frame)
-    train_end = int(n * (1.0 - val_fraction - holdout_fraction))
-    val_end = int(n * (1.0 - holdout_fraction))
-    return (
-        frame.iloc[:train_end].reset_index(drop=True),
-        frame.iloc[train_end:val_end].reset_index(drop=True),
-        frame.iloc[val_end:].reset_index(drop=True),
-    )
+    holdout_start = int(n * (1.0 - holdout_fraction))
+    holdout = frame.iloc[holdout_start:].reset_index(drop=True)
+
+    train_parts: list[pd.DataFrame] = []
+    val_parts: list[pd.DataFrame] = []
+    for i, start in enumerate(range(0, holdout_start, chunk_size)):
+        end = min(start + chunk_size, holdout_start)
+        chunk = frame.iloc[start:end]
+        (train_parts if i % 2 == 0 else val_parts).append(chunk)
+
+    empty = frame.iloc[0:0]
+    train = pd.concat(train_parts, ignore_index=True) if train_parts else empty
+    val = pd.concat(val_parts, ignore_index=True) if val_parts else empty
+    return train, val, holdout
