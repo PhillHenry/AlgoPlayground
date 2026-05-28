@@ -35,6 +35,7 @@ class TuneResult:
     study: optuna.Study
     holdout_loss: float
     holdout_sum_diff: float
+    holdout_mape: float
 
 
 def _suggest_lstm(trial: optuna.trial.Trial, n_features: int) -> LSTMRegressor:
@@ -182,7 +183,7 @@ def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
         study.best_trial.number,
     )
 
-    holdout_loss, holdout_sum_diff = _evaluate_best_on_holdout(
+    holdout_loss, holdout_sum_diff, holdout_mape = _evaluate_best_on_holdout(
         study,
         train_frame,
         val_frame,
@@ -193,6 +194,7 @@ def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
         study=study,
         holdout_loss=holdout_loss,
         holdout_sum_diff=holdout_sum_diff,
+        holdout_mape=holdout_mape,
     )
 
 
@@ -202,11 +204,13 @@ def _evaluate_best_on_holdout(
     val_frame: pd.DataFrame,
     holdout_frame: pd.DataFrame,
     config: TuneConfig,
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     """Refit best params on train (early-stopped on val) and score on holdout.
 
-    Returns ``(mse, sum_of_signed_differences)`` where the sum is computed in
-    the original target units (i.e. after inverting the normalization).
+    Returns ``(mse, sum_of_signed_differences, mape_percent)``. The sum and
+    MAPE are computed in the original target units (i.e. after inverting the
+    normalization). MAPE is expressed as a percentage; samples with a zero
+    actual target are excluded from the MAPE denominator.
     """
     params = study.best_params
     window_size = params["window_size"]
@@ -249,6 +253,15 @@ def _evaluate_best_on_holdout(
     targets = holdout_ds.normalization.invert_target(targets_norm)
     sum_diff = float(np.sum(preds - targets))
 
+    nonzero = targets != 0
+    if nonzero.any():
+        mape = float(
+            np.mean(np.abs((preds[nonzero] - targets[nonzero]) / targets[nonzero]))
+            * 100.0
+        )
+    else:
+        mape = float("nan")
+
     logger.info(
         "Holdout MSE: %.6f (over %d windows, target lags features by %d bar)",
         holdout_loss,
@@ -261,7 +274,13 @@ def _evaluate_best_on_holdout(
         sum_diff,
         sum_diff / max(len(holdout_ds), 1),
     )
-    return holdout_loss, sum_diff
+    logger.info(
+        "Holdout MAPE: %.4f%% (over %d non-zero targets of %d)",
+        mape,
+        int(nonzero.sum()),
+        len(holdout_ds),
+    )
+    return holdout_loss, sum_diff, mape
 
 
 def main(
@@ -298,7 +317,8 @@ def main(
     logger.info("Best validation MSE:        %.6f", result.study.best_value)
     logger.info("Holdout MSE:                %.6f", result.holdout_loss)
     logger.info("Holdout Σ(pred - actual):   %.6f", result.holdout_sum_diff)
-    logger.info("Best params:"  )
+    logger.info("Holdout MAPE:               %.4f%%", result.holdout_mape)
+    logger.info("Best params:")
     for name, value in result.study.best_params.items():
         logger.info("  %s: %s", name, value)
     return result
