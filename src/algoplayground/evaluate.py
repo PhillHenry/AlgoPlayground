@@ -158,7 +158,62 @@ def evaluate_on_holdout(
     return metrics
 
 
+_REQUIRED_COMMON_KEYS = (
+    "model_kind",
+    "window_size",
+    "batch_size",
+    "learning_rate",
+    "weight_decay",
+    "dropout",
+)
+_REQUIRED_LSTM_KEYS = ("hidden_size", "num_layers")
+_REQUIRED_CNN_KEYS = ("cnn_depth", "cnn_base_channels", "kernel_size")
+
+
+def _load_params(path: str) -> dict:
+    """Load and validate a model-params JSON file.
+
+    Expected shape (LSTM):
+        {"model_kind": "lstm", "window_size": int, "batch_size": int,
+         "learning_rate": float, "weight_decay": float, "dropout": float,
+         "hidden_size": int, "num_layers": int}
+
+    Expected shape (CNN):
+        {"model_kind": "cnn", "window_size": int, "batch_size": int,
+         "learning_rate": float, "weight_decay": float, "dropout": float,
+         "cnn_depth": int, "cnn_base_channels": int, "kernel_size": int}
+    """
+    import json
+    from pathlib import Path
+
+    with Path(path).open() as fh:
+        parsed = json.load(fh)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Params JSON must be an object, got {type(parsed).__name__}")
+
+    missing = [k for k in _REQUIRED_COMMON_KEYS if k not in parsed]
+    if missing:
+        raise ValueError(f"Params JSON missing required keys: {missing}")
+
+    kind = parsed["model_kind"]
+    if kind == "lstm":
+        required = _REQUIRED_LSTM_KEYS
+    elif kind == "cnn":
+        required = _REQUIRED_CNN_KEYS
+    else:
+        raise ValueError(f"Unknown model_kind: {kind!r} (expected 'lstm' or 'cnn')")
+    missing = [k for k in required if k not in parsed]
+    if missing:
+        raise ValueError(f"Params JSON missing {kind} keys: {missing}")
+
+    return parsed
+
+
 if __name__ == "__main__":
+    """
+    Run with something like:
+    ./.venv/bin/python -m algoplayground.evaluate  /home/henryp/Downloads/googl_dataset_London-Strategic-Edge.csv --max-epochs 22 --device cuda  /home/henryp/Code/Python/MyCode/AlgoPlayground/lstm.json 
+    """
     import argparse
 
     logging.basicConfig(
@@ -168,28 +223,20 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         description=(
-            "Train a single model with explicit hyperparameters on an OHLCV CSV "
-            "and report its holdout error."
+            "Train a single model whose hyperparameters are loaded from a JSON "
+            "file and report its holdout error on the given OHLCV CSV."
         )
     )
     parser.add_argument("csv_path", help="Path to an OHLCV CSV file.")
     parser.add_argument(
-        "--model-kind", choices=["lstm", "cnn"], required=True,
-        help="Which architecture to build.",
+        "params_path",
+        help=(
+            "Path to a JSON file with model parameters. Required keys: "
+            "model_kind, window_size, batch_size, learning_rate, weight_decay, "
+            "dropout, plus (lstm) hidden_size, num_layers OR (cnn) cnn_depth, "
+            "cnn_base_channels, kernel_size."
+        ),
     )
-
-    parser.add_argument("--window-size", type=int, required=True)
-    parser.add_argument("--batch-size", type=int, required=True)
-    parser.add_argument("--learning-rate", type=float, required=True)
-    parser.add_argument("--weight-decay", type=float, required=True)
-    parser.add_argument("--dropout", type=float, required=True)
-
-    parser.add_argument("--hidden-size", type=int, help="LSTM only")
-    parser.add_argument("--num-layers", type=int, help="LSTM only")
-
-    parser.add_argument("--cnn-depth", type=int, help="CNN only")
-    parser.add_argument("--cnn-base-channels", type=int, help="CNN only")
-    parser.add_argument("--kernel-size", type=int, help="CNN only")
 
     parser.add_argument("--holdout-fraction", type=float, default=0.15)
     parser.add_argument("--chunk-size", type=int, default=60)
@@ -199,19 +246,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.model_kind == "lstm" and (
-        args.hidden_size is None or args.num_layers is None
-    ):
-        parser.error("--model-kind lstm requires --hidden-size and --num-layers")
-    if args.model_kind == "cnn" and (
-        args.cnn_depth is None
-        or args.cnn_base_channels is None
-        or args.kernel_size is None
-    ):
-        parser.error(
-            "--model-kind cnn requires --cnn-depth, --cnn-base-channels and --kernel-size"
-        )
+    try:
+        params = _load_params(args.params_path)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
 
+    logger.info("Loaded model params from %s: %s", args.params_path, params)
     logger.info("Loading OHLCV CSV from %s", args.csv_path)
     frame = load_ohlcv_csv(args.csv_path)
     logger.info(
@@ -223,17 +263,17 @@ if __name__ == "__main__":
 
     evaluate_on_holdout(
         frame,
-        model_kind=args.model_kind,
-        window_size=args.window_size,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        dropout=args.dropout,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-        cnn_depth=args.cnn_depth,
-        cnn_base_channels=args.cnn_base_channels,
-        kernel_size=args.kernel_size,
+        model_kind=params["model_kind"],
+        window_size=params["window_size"],
+        batch_size=params["batch_size"],
+        learning_rate=params["learning_rate"],
+        weight_decay=params["weight_decay"],
+        dropout=params["dropout"],
+        hidden_size=params.get("hidden_size"),
+        num_layers=params.get("num_layers"),
+        cnn_depth=params.get("cnn_depth"),
+        cnn_base_channels=params.get("cnn_base_channels"),
+        kernel_size=params.get("kernel_size"),
         holdout_fraction=args.holdout_fraction,
         chunk_size=args.chunk_size,
         max_epochs=args.max_epochs,

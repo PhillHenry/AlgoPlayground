@@ -1,0 +1,10 @@
+{
+  "model_kind": "lstm",
+  "window_size": 64,
+  "batch_size": 32,
+  "learning_rate": 0.0001567993391672301,
+  "weight_decay": 2.6373339933815247e-05,
+  "hidden_size": 128,
+  "num_layers": 1,
+  "dropout": 0.45466020103939103
+}
