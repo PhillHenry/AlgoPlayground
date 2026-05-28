@@ -31,10 +31,24 @@ def plot_actual_vs_predicted(
 
     actual = frame["actual"].astype(float)
     predicted = frame["predicted"].astype(float)
+    diff = (
+        frame["diff"].astype(float)
+        if "diff" in frame.columns
+        else predicted - actual
+    )
 
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(actual.index, actual.values, label="actual", linewidth=1.2)
     ax.plot(predicted.index, predicted.values, label="predicted", linewidth=1.2)
+    ax.plot(
+        diff.index,
+        diff.values,
+        label="diff (pred - actual)",
+        linewidth=1.0,
+        color="tab:red",
+        alpha=0.7,
+    )
+    ax.axhline(0.0, color="black", linewidth=0.5, alpha=0.4)
     ax.set_xlabel("sample index")
     ax.set_ylabel("value")
     ax.set_title(f"actual vs predicted ({Path(csv_path).name})")
