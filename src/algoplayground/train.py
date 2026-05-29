@@ -60,7 +60,7 @@ def train_model(
     optimiser = torch.optim.Adam(
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
     )
-    loss_fn = nn.MSELoss()
+    loss_fn = nn.HuberLoss()
 
     best_val = math.inf
     best_epoch = -1
@@ -115,7 +115,7 @@ def evaluate_model(
     loader: DataLoader[tuple[torch.Tensor, torch.Tensor]] = DataLoader(
         dataset, batch_size=batch_size, shuffle=False, drop_last=False
     )
-    return _run_epoch(model, loader, nn.MSELoss(), device_t, optimiser=None)
+    return _run_epoch(model, loader, nn.HuberLoss(), device_t, optimiser=None)
 
 
 def predict_dataset(
