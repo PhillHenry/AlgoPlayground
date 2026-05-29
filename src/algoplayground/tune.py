@@ -396,7 +396,7 @@ def main(
 if __name__ == "__main__":
     """
     Run with something like:
-    ./.venv/bin/python -m algoplayground.tune  /home/henryp/Downloads/googl_dataset_London-Strategic-Edge.csv --n-trials 25 --max-epochs 30 --model-kind auto --device cuda --model-kind lstm
+    ./.venv/bin/python -m algoplayground.tune  /home/henryp/Downloads/googl_dataset_London-Strategic-Edge.csv --n-trials 10 --max-epochs 30 --model-kind auto --device cuda --model-kind lstm
     
     Typical Output:
         Best validation MSE: 0.000373

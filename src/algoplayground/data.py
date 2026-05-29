@@ -61,6 +61,8 @@ def load_ohlcv_csv(path: str | Path) -> pd.DataFrame:
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.sort_values("timestamp").reset_index(drop=True)
     df[list(OHLCV_COLUMNS)] = df[list(OHLCV_COLUMNS)].astype(np.float32)
+    df[list(OHLCV_COLUMNS)] = df[list(OHLCV_COLUMNS)].diff()
+    df = df.iloc[1:].reset_index(drop=True)
     return df
 
 
