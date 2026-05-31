@@ -14,6 +14,7 @@ from .data import (
     OHLCVWindowDataset,
     WalkForwardFold,
     load_ohlcv_csv,
+    merge_ohlcv_feeds,
     walk_forward_folds,
 )
 from .models import CNNConfig, CNNRegressor, LSTMConfig, LSTMRegressor
@@ -36,6 +37,8 @@ class TuneConfig:
     model_kind: ModelKind = "auto"
     device: str = "cpu"
     seed: int = 42
+    feature_columns: tuple[str, ...] | None = None
+    target_column: str | None = None
 
 
 @dataclass(frozen=True)
@@ -175,9 +178,18 @@ def tune(frame: pd.DataFrame, config: TuneConfig = TuneConfig()) -> TuneResult:
 
         fold_losses: list[float] = []
         for fold_idx, fold in enumerate(folds):
-            train_ds = OHLCVWindowDataset(fold.train, window_size=window_size)
+            train_ds = OHLCVWindowDataset(
+                fold.train,
+                window_size=window_size,
+                feature_columns=config.feature_columns,
+                target_column=config.target_column,
+            )
             val_ds = OHLCVWindowDataset(
-                fold.val, window_size=window_size, normalization=train_ds.normalization
+                fold.val,
+                window_size=window_size,
+                normalization=train_ds.normalization,
+                feature_columns=config.feature_columns,
+                target_column=config.target_column,
             )
 
             if kind == "lstm":
@@ -279,14 +291,25 @@ def _evaluate_best_on_holdout(
     window_size = params["window_size"]
     last_fold = folds[-1]
 
-    train_ds = OHLCVWindowDataset(last_fold.train, window_size=window_size)
+    train_ds = OHLCVWindowDataset(
+        last_fold.train,
+        window_size=window_size,
+        feature_columns=config.feature_columns,
+        target_column=config.target_column,
+    )
     val_ds = OHLCVWindowDataset(
-        last_fold.val, window_size=window_size, normalization=train_ds.normalization
+        last_fold.val,
+        window_size=window_size,
+        normalization=train_ds.normalization,
+        feature_columns=config.feature_columns,
+        target_column=config.target_column,
     )
     holdout_ds = OHLCVWindowDataset(
         holdout_frame,
         window_size=window_size,
         normalization=train_ds.normalization,
+        feature_columns=config.feature_columns,
+        target_column=config.target_column,
     )
 
     model = _build_from_params(params, train_ds.n_features, config.model_kind)
@@ -354,6 +377,7 @@ def _evaluate_best_on_holdout(
 
 def main(
     csv_path: str,
+    csv_path_2: str,
     n_trials: int = 25,
     max_epochs: int = 30,
     holdout_fraction: float = 0.15,
@@ -362,14 +386,26 @@ def main(
     device: str = "cpu",
     seed: int = 42,
 ) -> TuneResult:
-    """Load OHLCV data from ``csv_path``, tune, and report holdout error."""
-    logger.info("Loading OHLCV CSV from %s", csv_path)
-    frame = load_ohlcv_csv(csv_path)
+    """Load two OHLCV feeds, align them on timestamp, tune, and report error.
+
+    Both CSVs are loaded and inner-joined on ``timestamp`` so every training
+    and evaluation sample carries OHLCV features from both feeds at the same
+    instant. The prediction target is the first (primary) feed's next close.
+    """
+    logger.info("Loading OHLCV CSVs from %s and %s", csv_path, csv_path_2)
+    frame_a = load_ohlcv_csv(csv_path)
+    frame_b = load_ohlcv_csv(csv_path_2)
+    frame, feature_columns, target_column = merge_ohlcv_feeds(frame_a, frame_b)
     logger.info(
-        "Loaded %d rows spanning %s to %s",
+        "Merged feeds: %d primary + %d secondary rows -> %d aligned rows "
+        "spanning %s to %s (%d features, target=%s)",
+        len(frame_a),
+        len(frame_b),
         len(frame),
         frame["timestamp"].iloc[0],
         frame["timestamp"].iloc[-1],
+        len(feature_columns),
+        target_column,
     )
     result = tune(
         frame,
@@ -381,6 +417,8 @@ def main(
             model_kind=model_kind,
             device=device,
             seed=seed,
+            feature_columns=tuple(feature_columns),
+            target_column=target_column,
         ),
     )
     logger.info("Best validation MSE:        %.6f", result.study.best_value)
@@ -396,7 +434,7 @@ def main(
 if __name__ == "__main__":
     """
     Run with something like:
-    ./.venv/bin/python -m algoplayground.tune  /home/henryp/Downloads/googl_dataset_London-Strategic-Edge.csv --n-trials 10 --max-epochs 30 --model-kind auto --device cuda --model-kind lstm
+    ./.venv/bin/python -m algoplayground.tune  /home/henryp/Downloads/googl_dataset_London-Strategic-Edge.csv /home/henryp/Downloads/aapl_dataset_London-Strategic-Edge.csv --n-trials 10 --max-epochs 30 --model-kind auto --device cuda --model-kind lstm
     
     Typical Output:
         Best validation MSE: 0.000373
@@ -421,7 +459,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train and tune an OHLCV sequence regressor from a CSV file."
     )
-    parser.add_argument("csv_path", help="Path to an OHLCV CSV file.")
+    parser.add_argument(
+        "csv_path",
+        help="Path to the primary OHLCV CSV file (its next close is the target).",
+    )
+    parser.add_argument(
+        "csv_path_2",
+        help="Path to the secondary OHLCV CSV file (aligned on timestamp).",
+    )
     parser.add_argument("--n-trials", type=int, default=25)
     parser.add_argument("--max-epochs", type=int, default=30)
     parser.add_argument("--holdout-fraction", type=float, default=0.15)
@@ -442,6 +487,7 @@ if __name__ == "__main__":
 
     main(
         csv_path=args.csv_path,
+        csv_path_2=args.csv_path_2,
         n_trials=args.n_trials,
         max_epochs=args.max_epochs,
         holdout_fraction=args.holdout_fraction,

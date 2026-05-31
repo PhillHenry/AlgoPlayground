@@ -12,10 +12,13 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from collections.abc import Sequence
+
 from .data import (
     OHLCVWindowDataset,
     WalkForwardFold,
     load_ohlcv_csv,
+    merge_ohlcv_feeds,
     walk_forward_folds,
 )
 from .models import CNNConfig, CNNRegressor, LSTMConfig, LSTMRegressor
@@ -143,6 +146,8 @@ def evaluate_on_holdout(
     max_epochs: int = 30,
     early_stopping_patience: int = 5,
     device: str = "cpu",
+    feature_columns: Sequence[str] | None = None,
+    target_column: str | None = None,
 ) -> HoldoutMetrics:
     """Walk-forward train+validate, then refit on the last fold and score holdout.
 
@@ -197,6 +202,8 @@ def evaluate_on_holdout(
         cnn_base_channels=cnn_base_channels,
         kernel_size=kernel_size,
         train_config=train_config,
+        feature_columns=feature_columns,
+        target_column=target_column,
     )
     mean_fold_loss = float(np.mean(fold_losses))
     logger.info(
@@ -207,12 +214,25 @@ def evaluate_on_holdout(
     )
 
     last_fold = folds[-1]
-    train_ds = OHLCVWindowDataset(last_fold.train, window_size=window_size)
+    train_ds = OHLCVWindowDataset(
+        last_fold.train,
+        window_size=window_size,
+        feature_columns=feature_columns,
+        target_column=target_column,
+    )
     val_ds = OHLCVWindowDataset(
-        last_fold.val, window_size=window_size, normalization=train_ds.normalization
+        last_fold.val,
+        window_size=window_size,
+        normalization=train_ds.normalization,
+        feature_columns=feature_columns,
+        target_column=target_column,
     )
     holdout_ds = OHLCVWindowDataset(
-        holdout_frame, window_size=window_size, normalization=train_ds.normalization
+        holdout_frame,
+        window_size=window_size,
+        normalization=train_ds.normalization,
+        feature_columns=feature_columns,
+        target_column=target_column,
     )
 
     final_model = _build_model(
@@ -267,13 +287,24 @@ def _walk_forward_train(
     cnn_base_channels: int | None,
     kernel_size: int | None,
     train_config: TrainConfig,
+    feature_columns: Sequence[str] | None = None,
+    target_column: str | None = None,
 ) -> list[float]:
     """Train a fresh model per fold and return each fold's best val MSE."""
     fold_losses: list[float] = []
     for fold_idx, fold in enumerate(folds):
-        train_ds = OHLCVWindowDataset(fold.train, window_size=window_size)
+        train_ds = OHLCVWindowDataset(
+            fold.train,
+            window_size=window_size,
+            feature_columns=feature_columns,
+            target_column=target_column,
+        )
         val_ds = OHLCVWindowDataset(
-            fold.val, window_size=window_size, normalization=train_ds.normalization
+            fold.val,
+            window_size=window_size,
+            normalization=train_ds.normalization,
+            feature_columns=feature_columns,
+            target_column=target_column,
         )
         model = _build_model(
             model_kind,
@@ -353,7 +384,7 @@ def _load_params(path: str) -> dict:
 if __name__ == "__main__":
     """
     Run with something like:
-    ./.venv/bin/python -m algoplayground.evaluate  /home/henryp/Downloads/googl_dataset_London-Strategic-Edge.csv --max-epochs 22 --device cuda  /home/henryp/Code/Python/MyCode/AlgoPlayground/lstm.json 
+    ./.venv/bin/python -m algoplayground.evaluate  /home/henryp/Downloads/googl_dataset_London-Strategic-Edge.csv /home/henryp/Downloads/aapl_dataset_London-Strategic-Edge.csv --max-epochs 22 --device cuda  /home/henryp/Code/Python/MyCode/AlgoPlayground/lstm.json
     """
     import argparse
 
@@ -368,7 +399,14 @@ if __name__ == "__main__":
             "file and report its holdout error on the given OHLCV CSV."
         )
     )
-    parser.add_argument("csv_path", help="Path to an OHLCV CSV file.")
+    parser.add_argument(
+        "csv_path",
+        help="Path to the primary OHLCV CSV file (its next close is the target).",
+    )
+    parser.add_argument(
+        "csv_path_2",
+        help="Path to the secondary OHLCV CSV file (aligned on timestamp).",
+    )
     parser.add_argument(
         "params_path",
         help=(
@@ -393,17 +431,26 @@ if __name__ == "__main__":
         parser.error(str(exc))
 
     logger.info("Loaded model params from %s: %s", args.params_path, params)
-    logger.info("Loading OHLCV CSV from %s", args.csv_path)
-    frame = load_ohlcv_csv(args.csv_path)
+    logger.info("Loading OHLCV CSVs from %s and %s", args.csv_path, args.csv_path_2)
+    frame_a = load_ohlcv_csv(args.csv_path)
+    frame_b = load_ohlcv_csv(args.csv_path_2)
+    frame, feature_columns, target_column = merge_ohlcv_feeds(frame_a, frame_b)
     logger.info(
-        "Loaded %d rows spanning %s to %s",
+        "Merged feeds: %d primary + %d secondary rows -> %d aligned rows "
+        "spanning %s to %s (%d features, target=%s)",
+        len(frame_a),
+        len(frame_b),
         len(frame),
         frame["timestamp"].iloc[0],
         frame["timestamp"].iloc[-1],
+        len(feature_columns),
+        target_column,
     )
 
     evaluate_on_holdout(
         frame,
+        feature_columns=feature_columns,
+        target_column=target_column,
         model_kind=params["model_kind"],
         window_size=params["window_size"],
         batch_size=params["batch_size"],

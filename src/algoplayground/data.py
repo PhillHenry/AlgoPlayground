@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,6 +67,36 @@ def load_ohlcv_csv(path: str | Path) -> pd.DataFrame:
     return df
 
 
+def merge_ohlcv_feeds(
+    primary: pd.DataFrame,
+    secondary: pd.DataFrame,
+    primary_name: str = "feed0",
+    secondary_name: str = "feed1",
+) -> tuple[pd.DataFrame, list[str], str]:
+    """Inner-join two OHLCV feeds on ``timestamp`` into one feature frame.
+
+    Each feed's OHLCV columns are prefixed with its name so the two feeds stay
+    distinct (e.g. ``feed0_close``, ``feed1_close``). Only timestamps present in
+    *both* feeds survive the inner join, which guarantees every row pairs two
+    data points from the same instant. Returns the merged frame, the ordered
+    list of feature columns (primary feed first), and the target column name
+    (the primary feed's ``close``).
+    """
+    left = primary.rename(columns={c: f"{primary_name}_{c}" for c in OHLCV_COLUMNS})
+    right = secondary.rename(columns={c: f"{secondary_name}_{c}" for c in OHLCV_COLUMNS})
+    merged = (
+        left.merge(right, on="timestamp", how="inner")
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+    feature_columns = [
+        f"{name}_{c}"
+        for name in (primary_name, secondary_name)
+        for c in OHLCV_COLUMNS
+    ]
+    return merged, feature_columns, f"{primary_name}_close"
+
+
 class OHLCVWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     """Sliding-window dataset over OHLCV bars.
 
@@ -79,6 +110,8 @@ class OHLCVWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         window_size: int = 32,
         horizon: int = 1,
         normalization: Normalization | None = None,
+        feature_columns: Sequence[str] | None = None,
+        target_column: str | None = None,
     ) -> None:
         if window_size < 1:
             raise ValueError("window_size must be >= 1")
@@ -91,9 +124,13 @@ class OHLCVWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
 
         self.window_size = window_size
         self.horizon = horizon
+        self.feature_columns = list(
+            FEATURE_COLUMNS if feature_columns is None else feature_columns
+        )
+        self.target_column = TARGET_COLUMN if target_column is None else target_column
 
-        features = frame[list(FEATURE_COLUMNS)].to_numpy(dtype=np.float32)
-        targets = frame[TARGET_COLUMN].to_numpy(dtype=np.float32)
+        features = frame[self.feature_columns].to_numpy(dtype=np.float32)
+        targets = frame[self.target_column].to_numpy(dtype=np.float32)
 
         if normalization is None:
             fit_end = len(features) - horizon
@@ -105,7 +142,7 @@ class OHLCVWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
 
     @property
     def n_features(self) -> int:
-        return len(FEATURE_COLUMNS)
+        return len(self.feature_columns)
 
     def __len__(self) -> int:
         return len(self._features) - self.window_size - self.horizon + 1
